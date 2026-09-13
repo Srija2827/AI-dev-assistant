@@ -1,9 +1,11 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+UTC = timezone.utc
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database import Base
+from .database import Base
 
 
 class User(Base):
@@ -12,10 +14,34 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
 
-    histories = relationship("QueryHistory", back_populates="user", cascade="all, delete-orphan")
-    favorites = relationship("FavoriteResult", back_populates="user", cascade="all, delete-orphan")
+    deletion_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="active",
+        server_default="active",
+        index=True,
+    )
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
+    deletion_scheduled_for: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        index=True,
+    )
+
+    histories = relationship(
+        "QueryHistory", back_populates="user", cascade="all, delete-orphan"
+    )
+    favorites = relationship(
+        "FavoriteResult", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class QueryHistory(Base):
@@ -26,7 +52,9 @@ class QueryHistory(Base):
     action: Mapped[str] = mapped_column(String(50))
     code: Mapped[str] = mapped_column(Text)
     result_json: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
 
     user = relationship("User", back_populates="histories")
 
@@ -40,17 +68,81 @@ class FavoriteResult(Base):
     action: Mapped[str] = mapped_column(String(50))
     code: Mapped[str] = mapped_column(Text)
     result_json: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
 
     user = relationship("User", back_populates="favorites")
 
 
-class SharedSnippet(Base):
-    __tablename__ = "shared_snippets"
+class UserDataPurgeAudit(Base):
+    __tablename__ = "user_data_purge_audit"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id_hash: Mapped[str] = mapped_column(String(128), index=True)
+    email_hash: Mapped[str] = mapped_column(String(128), index=True)
+    history_deleted: Mapped[int] = mapped_column(Integer, default=0)
+    favorites_deleted: Mapped[int] = mapped_column(Integer, default=0)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="completed")
+
+
+class DigestSubscription(Base):
+    __tablename__ = "digest_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    unsubscribe_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    subscribed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+    last_sent_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+
+
+class SharedSnippet(Base):
+    __tablename__ = "shares"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), index=True, nullable=True
+    )
     token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    action: Mapped[str] = mapped_column(String(50))
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
     code: Mapped[str] = mapped_column(Text)
     result_json: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC)
+    )
+
+    owner = relationship("User", foreign_keys=[user_id])
+
+
+class AuditLog(Base):
+    """Append-only record of a privileged (admin) action.
+
+    Rows are written once and never updated or deleted by application code, so
+    the table acts as an immutable audit trail. ``actor_email`` is denormalised
+    so the record stays meaningful even if the acting user is later removed.
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    actor_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    actor_email: Mapped[str] = mapped_column(String(320))
+    action: Mapped[str] = mapped_column(String(100), index=True)
+    target_type: Mapped[str] = mapped_column(String(50), nullable=True)
+    target_id: Mapped[str] = mapped_column(String(64), nullable=True)
+    details: Mapped[str] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[str] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC), index=True
+    )
